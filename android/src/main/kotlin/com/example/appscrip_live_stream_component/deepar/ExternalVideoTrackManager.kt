@@ -10,6 +10,9 @@ import org.webrtc.VideoFrame
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.MediaStream
+import org.webrtc.YuvHelper
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.ArrayList
 import java.util.HashMap
 import java.util.UUID
@@ -37,9 +40,20 @@ class ExternalVideoTrackManager {
   private var capturerStarted = false
   private val pushing = AtomicBoolean(false)
   private var webrtcHandler: Any? = null
+  private var rgbaScratch: ByteBuffer? = null
+  private var libyuvFailed = false
 
   private var frameThread: HandlerThread? = null
   private var frameHandler: Handler? = null
+
+  // ponytail: sharedSingleton is process-global. Use it whenever it already has
+  // a factory (single-engine hosts). Only if it does not, ask the engine that
+  // received this call — a later background engine can overwrite the singleton.
+  private var enginePluginLookup: (() -> Any?)? = null
+
+  fun bindEngineLookup(lookup: (() -> Any?)?) {
+    enginePluginLookup = lookup
+  }
 
   fun createTrack(width: Int, height: Int, result: MethodChannel.Result) {
     try {
@@ -48,9 +62,7 @@ class ExternalVideoTrackManager {
 
       val plugin = resolveFlutterWebRtcPlugin()
         ?: throw IllegalStateException("FlutterWebRTCPlugin not ready")
-      val factory = plugin.javaClass
-        .getMethod("getPeerConnectionFactory")
-        .invoke(plugin) as? PeerConnectionFactory
+      val factory = peerConnectionFactoryOf(plugin)
         ?: throw IllegalStateException("PeerConnectionFactory is null — connect LiveKit first")
 
       val handler = resolveHandler(plugin)
@@ -232,15 +244,38 @@ class ExternalVideoTrackManager {
     webrtcHandler = null
     trackId = null
     streamId = null
+    rgbaScratch = null
     stopFrameThread()
   }
 
   private fun resolveFlutterWebRtcPlugin(): Any? {
-    return try {
+    val singleton = try {
       val clazz = Class.forName("com.cloudwebrtc.webrtc.FlutterWebRTCPlugin")
       clazz.getField("sharedSingleton").get(null)
     } catch (t: Throwable) {
       Log.e(TAG, "FlutterWebRTCPlugin lookup failed", t)
+      null
+    }
+    if (singleton != null && peerConnectionFactoryOf(singleton) != null) {
+      return singleton
+    }
+    val fromEngine = try {
+      enginePluginLookup?.invoke()
+    } catch (t: Throwable) {
+      Log.e(TAG, "FlutterWebRTCPlugin engine lookup failed", t)
+      null
+    }
+    if (fromEngine != null && peerConnectionFactoryOf(fromEngine) != null) {
+      return fromEngine
+    }
+    return singleton ?: fromEngine
+  }
+
+  private fun peerConnectionFactoryOf(plugin: Any): PeerConnectionFactory? {
+    return try {
+      plugin.javaClass.getMethod("getPeerConnectionFactory").invoke(plugin) as? PeerConnectionFactory
+    } catch (t: Throwable) {
+      Log.e(TAG, "getPeerConnectionFactory failed", t)
       null
     }
   }
@@ -252,6 +287,38 @@ class ExternalVideoTrackManager {
       ?: throw IllegalStateException("methodCallHandler is null")
   }
 
+  private fun convertRgbaWithLibyuv(
+    src: ByteArray,
+    width: Int,
+    height: Int,
+    buffer: JavaI420Buffer,
+  ) {
+    val needed = width * height * 4
+    if (src.size < needed) {
+      throw IllegalArgumentException("rgba frame smaller than ${width}x$height")
+    }
+    var direct = rgbaScratch
+    if (direct == null || direct.capacity() < needed) {
+      direct = ByteBuffer.allocateDirect(needed).order(ByteOrder.nativeOrder())
+      rgbaScratch = direct
+    }
+    direct.clear()
+    direct.put(src, 0, needed)
+    direct.flip()
+    YuvHelper.ABGRToI420(
+      direct,
+      width * 4,
+      buffer.dataY,
+      buffer.strideY,
+      buffer.dataU,
+      buffer.strideU,
+      buffer.dataV,
+      buffer.strideV,
+      width,
+      height,
+    )
+  }
+
   private fun convertToI420(
     src: ByteArray,
     width: Int,
@@ -260,6 +327,18 @@ class ExternalVideoTrackManager {
     mirror: Boolean,
     buffer: JavaI420Buffer,
   ) {
+    // Android DeepAR frames are RGBA, which is libyuv ABGR in memory.
+    // mirror stays on the scalar path; the publisher does not set it.
+    if (!mirror && !libyuvFailed && format.equals("rgba", ignoreCase = true)) {
+      try {
+        convertRgbaWithLibyuv(src, width, height, buffer)
+        return
+      } catch (t: Throwable) {
+        libyuvFailed = true
+        Log.w(TAG, "libyuv ABGRToI420 failed, using scalar convert", t)
+      }
+    }
+
     val isBgra = format.equals("bgra", ignoreCase = true)
     val y = buffer.dataY
     val u = buffer.dataU

@@ -26,6 +26,15 @@ class AppscripLiveStreamComponentPlugin : FlutterPlugin, MethodCallHandler {
     appContext = flutterPluginBinding.applicationContext
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "appscrip_live_stream_component")
     channel.setMethodCallHandler(this)
+    externalVideo.bindEngineLookup {
+      // Reflect so host apps on an older embedding keep compiling and
+      // fall back to sharedSingleton.
+      val clazz = Class.forName("com.cloudwebrtc.webrtc.FlutterWebRTCPlugin")
+      val getPlugin = flutterPluginBinding.javaClass.methods.firstOrNull {
+        it.name == "getPlugin" && it.parameterTypes.size == 1
+      } ?: return@bindEngineLookup null
+      getPlugin.invoke(flutterPluginBinding, clazz)
+    }
   }
 
   override fun onMethodCall(call: MethodCall, result: Result) {
@@ -65,6 +74,7 @@ class AppscripLiveStreamComponentPlugin : FlutterPlugin, MethodCallHandler {
   }
 
   override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+    externalVideo.bindEngineLookup(null)
     externalVideo.dispose(object : Result {
       override fun success(result: Any?) {}
       override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {}
