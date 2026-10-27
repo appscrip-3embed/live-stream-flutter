@@ -27,7 +27,6 @@ const Map<String, String> ismLiveStringsFr = {
   'recordings': 'Enregistrements',
   'noRecordings': 'Aucun enregistrement',
   'normal': 'Normal',
-  'threeD': '3D',
   'animated': 'Animé',
   'copublisherRequests': 'Demandes',
   'users': 'Utilisateurs',

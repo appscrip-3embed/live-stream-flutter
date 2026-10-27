@@ -11,7 +11,6 @@ class IsmLiveAssetConstants {
   static const String _gifts = '$_images/gifts';
 
   static const String _normalGift = '$_gifts/normal';
-  static const String _3dGift = '$_gifts/3d';
   static const String _animatedGift = '$_gifts/animated';
 
   static const String _logo = '$_path/logo';
@@ -58,20 +57,6 @@ class IsmLiveAssetConstants {
   static const String verified = '$_animatedGift/verified.gif';
   static const String wow = '$_animatedGift/wow.gif';
   static const String yeah = '$_animatedGift/yeah.gif';
-
-  static const String cake3d = '$_3dGift/cake.gif';
-  static const String cheers3d = '$_3dGift/cheers.gif';
-  static const String clapping3d = '$_3dGift/clapping.gif';
-  static const String crown3d = '$_3dGift/crown.gif';
-  static const String fire = '$_3dGift/fire.gif';
-  static const String fish = '$_3dGift/fish.gif';
-  static const String happyBirthday = '$_3dGift/happy_birthday.gif';
-  static const String heartEyes3d = '$_3dGift/heart_eyes.gif';
-  static const String love = '$_3dGift/love.gif';
-  static const String money3d = '$_3dGift/money.gif';
-  static const String partyPopper = '$_3dGift/party_popper.gif';
-  static const String rocket = '$_3dGift/rocket.gif';
-  static const String trophy3d = '$_3dGift/trophy.gif';
 
   static const String backRounded = '$_icons/back_rounded.svg';
   static const String galerryRoundedSvg = '$_icons/gallery_rounded.svg';

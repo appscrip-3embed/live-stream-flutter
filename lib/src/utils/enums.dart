@@ -505,12 +505,10 @@ enum IsmLiveCustomType {
 
 enum IsmLiveGiftType {
   normal,
-  threeD,
   animated;
 
   String get label => switch (this) {
         IsmLiveGiftType.normal => IsmLiveStrings.normal,
-        IsmLiveGiftType.threeD => IsmLiveStrings.threeD,
         IsmLiveGiftType.animated => IsmLiveStrings.animated,
       };
 
@@ -518,8 +516,6 @@ enum IsmLiveGiftType {
     switch (this) {
       case IsmLiveGiftType.normal:
         return IsmLiveGifts.normal;
-      case IsmLiveGiftType.threeD:
-        return IsmLiveGifts.threeD;
       case IsmLiveGiftType.animated:
         return IsmLiveGifts.animated;
     }
@@ -560,20 +556,7 @@ enum IsmLiveGifts {
   trophy(IsmLiveGiftType.animated, IsmLiveAssetConstants.trophy),
   verified(IsmLiveGiftType.animated, IsmLiveAssetConstants.verified),
   wow(IsmLiveGiftType.animated, IsmLiveAssetConstants.wow),
-  yeah(IsmLiveGiftType.animated, IsmLiveAssetConstants.yeah),
-  cake3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.cake3d),
-  cheers3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.cheers3d),
-  clapping3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.clapping3d),
-  crown3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.crown3d),
-  fire(IsmLiveGiftType.threeD, IsmLiveAssetConstants.fire),
-  fish(IsmLiveGiftType.threeD, IsmLiveAssetConstants.fish),
-  happyBirthday(IsmLiveGiftType.threeD, IsmLiveAssetConstants.happyBirthday),
-  heartEyes3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.heartEyes3d),
-  love(IsmLiveGiftType.threeD, IsmLiveAssetConstants.love),
-  money3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.money3d),
-  partyPopper(IsmLiveGiftType.threeD, IsmLiveAssetConstants.partyPopper),
-  rocket(IsmLiveGiftType.threeD, IsmLiveAssetConstants.rocket),
-  trophy3d(IsmLiveGiftType.threeD, IsmLiveAssetConstants.trophy3d);
+  yeah(IsmLiveGiftType.animated, IsmLiveAssetConstants.yeah);
 
   factory IsmLiveGifts.fromName(String data) => IsmLiveGifts.values
       .firstWhere((e) => e.name == data, orElse: () => IsmLiveGifts.bell);
@@ -584,10 +567,6 @@ enum IsmLiveGifts {
 
   static List<IsmLiveGifts> get normal => IsmLiveGifts.values
       .where((e) => e.type == IsmLiveGiftType.normal)
-      .toList();
-
-  static List<IsmLiveGifts> get threeD => IsmLiveGifts.values
-      .where((e) => e.type == IsmLiveGiftType.threeD)
       .toList();
 
   static List<IsmLiveGifts> get animated => IsmLiveGifts.values

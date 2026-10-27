@@ -29,7 +29,6 @@ class IsmLiveStrings {
   static String get recordings => _t('recordings');
   static String get noRecordings => _t('noRecordings');
   static String get normal => _t('normal');
-  static String get threeD => _t('threeD');
   static String get animated => _t('animated');
   static String get copublisherRequests => _t('copublisherRequests');
   static String get users => _t('users');

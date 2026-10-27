@@ -807,7 +807,6 @@ mixin StreamJoinConnectionMixin on StreamJoinMixin, StreamJoinCameraMixin {
 
       if (performNavigation) {
         try {
-          IsmLiveGifts.threeD.map((e) => IsmLiveGif.preCache(e.path, context));
           IsmLiveGifts.animated
               .map((e) => IsmLiveGif.preCache(e.path, context));
         } catch (e) {

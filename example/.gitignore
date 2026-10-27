@@ -38,6 +38,11 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
+# Duplicate of the platform effect bundles. Android loads
+# android/app/src/main/assets/effects and iOS loads Runner/effects.
+# Kept on disk for local reference; not part of the app binary.
+/assets/effects/*.deepar
+
 # Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile
