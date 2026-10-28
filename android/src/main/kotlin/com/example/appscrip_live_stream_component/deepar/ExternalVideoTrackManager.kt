@@ -11,10 +11,15 @@ import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.MediaStream
 import org.webrtc.YuvHelper
+import java.lang.reflect.Field
+import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.ArrayDeque
 import java.util.ArrayList
 import java.util.HashMap
+import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -26,6 +31,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * ponytail: reflection into flutter_webrtc internals — replace with public
  * CustomVideoSource API when flutter-webrtc PR #2094 merges.
+ * Release R8 renames those members; consumer-rules.pro keeps the names, and
+ * the lookups below also match by type when a host shrink config drops them.
  */
 class ExternalVideoTrackManager {
   companion object {
@@ -49,10 +56,11 @@ class ExternalVideoTrackManager {
   // ponytail: sharedSingleton is process-global. Use it whenever it already has
   // a factory (single-engine hosts). Only if it does not, ask the engine that
   // received this call — a later background engine can overwrite the singleton.
-  private var enginePluginLookup: (() -> Any?)? = null
+  // The lookup returns the FlutterPluginBinding, not the WebRTC plugin.
+  private var engineBindingLookup: (() -> Any?)? = null
 
   fun bindEngineLookup(lookup: (() -> Any?)?) {
-    enginePluginLookup = lookup
+    engineBindingLookup = lookup
   }
 
   fun createTrack(width: Int, height: Int, result: MethodChannel.Result) {
@@ -64,6 +72,7 @@ class ExternalVideoTrackManager {
         ?: throw IllegalStateException("FlutterWebRTCPlugin not ready")
       val factory = peerConnectionFactoryOf(plugin)
         ?: throw IllegalStateException("PeerConnectionFactory is null — connect LiveKit first")
+      Log.i("FlutterDeepAR", "WebRTC factory ready")
 
       val handler = resolveHandler(plugin)
       webrtcHandler = handler
@@ -79,30 +88,20 @@ class ExternalVideoTrackManager {
 
       source.capturerObserver.onCapturerStarted(true)
       capturerStarted = true
-
-      // Register with flutter_webrtc. Do NOT setVideoProcessor — push frames
-      // straight into capturerObserver so they reach the encoder/renderer.
-      val localVideoTrackClass = Class.forName("com.cloudwebrtc.webrtc.video.LocalVideoTrack")
-      val localVideoTrack = localVideoTrackClass
-        .getConstructor(VideoTrack::class.java)
-        .newInstance(track)
-
-      handler.javaClass
-        .getMethod("putLocalStream", String::class.java, MediaStream::class.java)
-        .invoke(handler, sid, stream)
-      handler.javaClass
-        .getMethod(
-          "putLocalTrack",
-          String::class.java,
-          Class.forName("com.cloudwebrtc.webrtc.LocalTrack"),
-        )
-        .invoke(handler, tid, localVideoTrack)
-
+      // Own the objects before the reflective register. If that throws (R8
+      // renamed LocalVideoTrack), disposeInternal must still release them —
+      // a leaked started source breaks the next camera offer's m-line order.
       videoSource = source
       videoTrack = track
       mediaStream = stream
       streamId = sid
       trackId = tid
+
+      // Register with flutter_webrtc. Do NOT setVideoProcessor — push frames
+      // straight into capturerObserver so they reach the encoder/renderer.
+      val localVideoTrack = wrapVideoTrack(track, handler)
+      invoke(handler, "putLocalStream", sid, stream, allowRename = true)
+      invoke(handler, "putLocalTrack", tid, localVideoTrack, allowRename = true)
 
       val videoTrackMap = HashMap<String, Any?>()
       videoTrackMap["id"] = tid
@@ -124,6 +123,12 @@ class ExternalVideoTrackManager {
       result.success(response)
     } catch (t: Throwable) {
       Log.e(TAG, "createTrack failed", t)
+      // Same tag the host filters on, so the reason sits next to "pipeline destroyed".
+      Log.e(
+        "FlutterDeepAR",
+        "external video track failed: ${t.javaClass.simpleName}: ${t.message}",
+        t,
+      )
       disposeInternal()
       result.error("createExternalVideoTrack", t.message, null)
     }
@@ -231,13 +236,13 @@ class ExternalVideoTrackManager {
     val sid = streamId
     if (handler != null && tid != null) {
       try {
-        handler.javaClass.getMethod("trackDispose", String::class.java).invoke(handler, tid)
+        invoke(handler, "trackDispose", tid, allowRename = false)
       } catch (_: Throwable) {
       }
     }
     if (handler != null && sid != null) {
       try {
-        handler.javaClass.getMethod("streamDispose", String::class.java).invoke(handler, sid)
+        invoke(handler, "streamDispose", sid, allowRename = false)
       } catch (_: Throwable) {
       }
     }
@@ -249,42 +254,305 @@ class ExternalVideoTrackManager {
   }
 
   private fun resolveFlutterWebRtcPlugin(): Any? {
-    val singleton = try {
-      val clazz = Class.forName("com.cloudwebrtc.webrtc.FlutterWebRTCPlugin")
-      clazz.getField("sharedSingleton").get(null)
-    } catch (t: Throwable) {
-      Log.e(TAG, "FlutterWebRTCPlugin lookup failed", t)
-      null
-    }
-    if (singleton != null && peerConnectionFactoryOf(singleton) != null) {
-      return singleton
-    }
-    val fromEngine = try {
-      enginePluginLookup?.invoke()
+    // The engine that received this call owns the factory LiveKit initialized.
+    // sharedSingleton is whatever FlutterWebRTCPlugin was constructed last, and
+    // a later engine overwrites it with an instance whose factory is still null.
+    val binding = try {
+      engineBindingLookup?.invoke()
     } catch (t: Throwable) {
       Log.e(TAG, "FlutterWebRTCPlugin engine lookup failed", t)
       null
     }
-    if (fromEngine != null && peerConnectionFactoryOf(fromEngine) != null) {
-      return fromEngine
+    if (binding != null) {
+      pluginFromBinding(binding)?.let { return it }
     }
-    return singleton ?: fromEngine
+    val singleton = pluginByName()
+    if (singleton != null && peerConnectionFactoryOf(singleton) != null) {
+      return singleton
+    }
+    return null
   }
 
-  private fun peerConnectionFactoryOf(plugin: Any): PeerConnectionFactory? {
+  private fun pluginByName(): Any? {
     return try {
-      plugin.javaClass.getMethod("getPeerConnectionFactory").invoke(plugin) as? PeerConnectionFactory
+      val clazz = Class.forName("com.cloudwebrtc.webrtc.FlutterWebRTCPlugin")
+      try {
+        clazz.getField("sharedSingleton").get(null)
+      } catch (_: Throwable) {
+        clazz.declaredFields.firstOrNull { field ->
+          Modifier.isStatic(field.modifiers) &&
+            (field.type == clazz || clazz.isAssignableFrom(field.type))
+        }?.apply { isAccessible = true }?.get(null)
+      }
     } catch (t: Throwable) {
-      Log.e(TAG, "getPeerConnectionFactory failed", t)
+      Log.e(TAG, "FlutterWebRTCPlugin lookup failed", t)
       null
     }
   }
 
+  /**
+   * WebRTC plugin registered on this engine.
+   * Release R8 renames getFlutterEngine / getPlugins, so the walk follows
+   * fields and plugin maps instead of those names. sharedSingleton is not used
+   * here: a second Flutter engine replaces it with an uninitialized plugin.
+   */
+  private fun pluginFromBinding(binding: Any): Any? {
+    try {
+      val webrtcClass = Class.forName("com.cloudwebrtc.webrtc.FlutterWebRTCPlugin")
+      for (method in binding.javaClass.methods) {
+        if (Modifier.isStatic(method.modifiers) || method.parameterTypes.size != 1) continue
+        if (method.parameterTypes[0] != Class::class.java) continue
+        val plugin = try {
+          method.invoke(binding, webrtcClass)
+        } catch (_: Throwable) {
+          null
+        } ?: continue
+        if (peerConnectionFactoryOf(plugin) != null) return plugin
+      }
+    } catch (_: Throwable) {
+    }
+    return findPluginWithFactory(binding)
+  }
+
+  /** BFS from the binding until a plugin map holds an initialized factory. */
+  private fun findPluginWithFactory(root: Any): Any? {
+    val seen = IdentityHashMap<Any, Boolean>()
+    val queue = ArrayDeque<Pair<Any, Int>>()
+    queue.add(root to 0)
+    var visited = 0
+    while (queue.isNotEmpty() && visited < 400) {
+      val (obj, depth) = queue.poll() ?: break
+      if (seen.containsKey(obj)) continue
+      seen[obj] = true
+      visited++
+      for (value in instanceValues(obj)) {
+        if (value is Map<*, *>) {
+          for (plugin in value.values) {
+            if (plugin != null && peerConnectionFactoryOf(plugin) != null) return plugin
+          }
+          continue
+        }
+        if (depth < 4 && worthDescending(value)) {
+          queue.add(value to depth + 1)
+        }
+      }
+    }
+    return null
+  }
+
+  private fun worthDescending(value: Any): Boolean {
+    if (value is PeerConnectionFactory) return false
+    val name = value.javaClass.name
+    return !(name.startsWith("java.") ||
+      name.startsWith("javax.") ||
+      name.startsWith("android.") ||
+      name.startsWith("androidx.") ||
+      name.startsWith("kotlin.") ||
+      name.startsWith("kotlinx.") ||
+      name.startsWith("dalvik."))
+  }
+
+  private fun peerConnectionFactoryOf(owner: Any): PeerConnectionFactory? {
+    if (owner is PeerConnectionFactory) return null
+    // Name first (debug). Release R8 renames the getter but keeps the return type.
+    val getters = ArrayList<Method>()
+    var cls: Class<*>? = owner.javaClass
+    while (cls != null && cls != Any::class.java) {
+      for (method in cls.declaredMethods) {
+        if (Modifier.isStatic(method.modifiers) || method.parameterTypes.isNotEmpty()) continue
+        if (PeerConnectionFactory::class.java.isAssignableFrom(method.returnType)) {
+          getters.add(method)
+        }
+      }
+      cls = cls.superclass
+    }
+    getters.sortByDescending { it.name == "getPeerConnectionFactory" }
+    for (method in getters) {
+      val factory = try {
+        method.isAccessible = true
+        method.invoke(owner) as? PeerConnectionFactory
+      } catch (_: Throwable) {
+        null
+      }
+      if (factory != null) return factory
+    }
+    return try {
+      findFactory(owner, 0, IdentityHashMap())
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  private fun findFactory(
+    obj: Any?,
+    depth: Int,
+    seen: IdentityHashMap<Any, Boolean>,
+  ): PeerConnectionFactory? {
+    if (obj == null || depth > 1 || seen.containsKey(obj)) return null
+    seen[obj] = true
+    val typeName = obj.javaClass.name
+    if (depth > 0 &&
+      (typeName.startsWith("java.") ||
+        typeName.startsWith("android.") ||
+        typeName.startsWith("androidx.") ||
+        typeName.startsWith("kotlin."))
+    ) {
+      return null
+    }
+    for (field in instanceFields(obj.javaClass)) {
+      if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+      field.isAccessible = true
+      val value = try {
+        field.get(obj)
+      } catch (_: Throwable) {
+        null
+      } ?: continue
+      if (value is PeerConnectionFactory) return value
+      if (depth < 1) {
+        findFactory(value, depth + 1, seen)?.let { return it }
+      }
+    }
+    return null
+  }
+
+  private fun instanceFields(type: Class<*>): List<Field> {
+    val fields = ArrayList<Field>()
+    var cls: Class<*>? = type
+    while (cls != null && cls != Any::class.java) {
+      fields.addAll(cls.declaredFields)
+      cls = cls.superclass
+    }
+    return fields
+  }
+
+  private fun instanceValues(obj: Any): List<Any> {
+    val values = ArrayList<Any>()
+    for (field in instanceFields(obj.javaClass)) {
+      if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+      field.isAccessible = true
+      val value = try {
+        field.get(obj)
+      } catch (_: Throwable) {
+        null
+      } ?: continue
+      values.add(value)
+    }
+    return values
+  }
+
   private fun resolveHandler(plugin: Any): Any {
-    val field = plugin.javaClass.getDeclaredField("methodCallHandler")
-    field.isAccessible = true
-    return field.get(plugin)
-      ?: throw IllegalStateException("methodCallHandler is null")
+    try {
+      val field = plugin.javaClass.getDeclaredField("methodCallHandler")
+      field.isAccessible = true
+      field.get(plugin)?.let { return it }
+    } catch (_: Throwable) {
+    }
+    for (field in plugin.javaClass.declaredFields) {
+      if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+      if (PeerConnectionFactory::class.java.isAssignableFrom(field.type)) continue
+      field.isAccessible = true
+      val value = try {
+        field.get(plugin)
+      } catch (_: Throwable) {
+        null
+      } ?: continue
+      if (hasDirectFactory(value)) return value
+    }
+    throw IllegalStateException("methodCallHandler is null")
+  }
+
+  private fun hasDirectFactory(obj: Any): Boolean {
+    return obj.javaClass.declaredFields.any { field ->
+      PeerConnectionFactory::class.java.isAssignableFrom(field.type)
+    }
+  }
+
+  /**
+   * LocalVideoTrack by name when R8 kept it. Otherwise the handler method
+   * parameter that can be constructed from a [VideoTrack] (LocalTrack).
+   * Class.forName fails once release shrink renames the class.
+   */
+  private fun wrapVideoTrack(track: VideoTrack, handler: Any): Any {
+    try {
+      val cls = Class.forName("com.cloudwebrtc.webrtc.video.LocalVideoTrack")
+      val ctor = cls.getConstructor(VideoTrack::class.java)
+      ctor.isAccessible = true
+      return ctor.newInstance(track)
+    } catch (t: Throwable) {
+      Log.w(TAG, "LocalVideoTrack by name failed, using handler parameter type", t)
+    }
+    var best: Class<*>? = null
+    var bestDepth = -1
+    val methods = handler.javaClass.methods.asList() + handler.javaClass.declaredMethods.asList()
+    for (method in methods) {
+      if (method.parameterTypes.size != 2 || method.parameterTypes[0] != String::class.java) {
+        continue
+      }
+      val param = method.parameterTypes[1]
+      val matches = param.declaredConstructors.any { c ->
+        c.parameterTypes.size == 1 && c.parameterTypes[0].isAssignableFrom(track.javaClass)
+      }
+      if (!matches) continue
+      val depth = inheritanceDepth(param)
+      if (depth > bestDepth) {
+        bestDepth = depth
+        best = param
+      }
+    }
+    val cls = best ?: throw IllegalStateException("WebRTC local-track type not found")
+    val ctor = cls.declaredConstructors.first { c ->
+      c.parameterTypes.size == 1 && c.parameterTypes[0].isAssignableFrom(track.javaClass)
+    }
+    ctor.isAccessible = true
+    return ctor.newInstance(track)
+  }
+
+  private fun inheritanceDepth(type: Class<*>): Int {
+    var depth = 0
+    var current: Class<*>? = type
+    while (current != null && current != Any::class.java) {
+      depth++
+      current = current.superclass
+    }
+    return depth
+  }
+
+  /**
+   * Prefer the real method name. [allowRename] is only for register calls:
+   * dispose names are ambiguous (many one-String methods) once R8 renames them.
+   */
+  private fun invoke(target: Any, name: String, vararg args: Any?, allowRename: Boolean) {
+    val method = findInvokable(target, name, args, allowRename)
+    method.isAccessible = true
+    method.invoke(target, *args)
+  }
+
+  private fun findInvokable(
+    target: Any,
+    name: String,
+    args: Array<out Any?>,
+    allowRename: Boolean,
+  ): Method {
+    val all = LinkedHashSet<Method>()
+    all.addAll(target.javaClass.methods)
+    all.addAll(target.javaClass.declaredMethods)
+    fun accepts(m: Method): Boolean {
+      if (m.parameterTypes.size != args.size) return false
+      for (i in args.indices) {
+        val arg = args[i] ?: continue
+        if (!m.parameterTypes[i].isAssignableFrom(arg.javaClass)) return false
+      }
+      return true
+    }
+    all.firstOrNull { it.name == name && accepts(it) }?.let { return it }
+    if (!allowRename) throw NoSuchMethodException(name)
+    val fallback = all.filter { method ->
+      accepts(method) && method.parameterTypes.none { it == Object::class.java }
+    }
+    if (fallback.isEmpty()) throw NoSuchMethodException(name)
+    return fallback.maxBy { method ->
+      method.parameterTypes.sumOf { inheritanceDepth(it) }
+    }
   }
 
   private fun convertRgbaWithLibyuv(

@@ -30,6 +30,37 @@ class IsmLiveDeepArPublisher {
   int _frameCount = 0;
   int _droppedCount = 0;
 
+  /// Serializes start/stop. Release AOT overlaps a second publish or a
+  /// dispose with init; that calls stopCapture before startCapture and the
+  /// engine is destroyed. Queued calls run one at a time.
+  Future<void> _chain = Future<void>.value();
+
+  Future<T> _chainCall<T>(Future<T> Function() action) {
+    final result = _chain.catchError((Object _) {}).then((_) => action());
+    _chain = result.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return result;
+  }
+
+  /// Fresh maps so release AOT does not reject the method-channel types
+  /// inside flutter_webrtc's MediaStreamTrackNative constructor.
+  List<dynamic> _tracksForWebRtc(dynamic value) {
+    if (value is! List) return <dynamic>[];
+    final tracks = <dynamic>[];
+    for (final item in value) {
+      if (item is! Map) continue;
+      tracks.add(<String, Object?>{
+        'id': '${item['id']}',
+        'label': '${item['label']}',
+        'kind': '${item['kind']}',
+        'enabled': item['enabled'] == true,
+        'readyState': '${item['readyState'] ?? 'live'}',
+        'remote': item['remote'] == true,
+        'settings': <Object?, Object?>{},
+      });
+    }
+    return tracks;
+  }
+
   bool get isStarted => _started;
   bool get isFrontCamera => _isFrontCamera;
   IsmLiveDeepArEffect get currentEffect => _currentEffect;
@@ -40,6 +71,12 @@ class IsmLiveDeepArPublisher {
   /// Returns a LiveKit camera [lk.LocalVideoTrack] ready to publish, or
   /// throws if setup fails (caller should fall back to normal camera).
   Future<lk.LocalVideoTrack> start({
+    required bool frontCamera,
+    lk.VideoParameters? params,
+  }) =>
+      _chainCall(() => _start(frontCamera: frontCamera, params: params));
+
+  Future<lk.LocalVideoTrack> _start({
     required bool frontCamera,
     lk.VideoParameters? params,
   }) async {
@@ -72,15 +109,23 @@ class IsmLiveDeepArPublisher {
       throw StateError('DeepAR initialize failed');
     }
 
-    final response = await IsmLiveExternalVideoSource.createTrack(
-      width: width,
-      height: height,
-    );
+    final Map<dynamic, dynamic> response;
+    try {
+      response = await IsmLiveExternalVideoSource.createTrack(
+        width: width,
+        height: height,
+      );
+    } catch (e) {
+      await IsmLiveExternalVideoSource.log(
+        'DeepAR external track failed before capture: $e',
+      );
+      rethrow;
+    }
     final streamId = response['streamId'] as String;
     final stream = MediaStreamNative(streamId, 'local');
     stream.setMediaTracks(
-      response['audioTracks'] ?? const <dynamic>[],
-      response['videoTracks'] ?? const <dynamic>[],
+      _tracksForWebRtc(response['audioTracks']),
+      _tracksForWebRtc(response['videoTracks']),
     );
     _mediaStream = stream;
 
@@ -114,7 +159,7 @@ class IsmLiveDeepArPublisher {
     IsmLiveLog.info('DeepAR capture started front=$frontCamera');
 
     _currentEffect = defaultEffect;
-    await applyEffect(_currentEffect);
+    await _applyEffect(_currentEffect);
 
     _started = true;
     IsmLiveLog.info(
@@ -154,7 +199,10 @@ class IsmLiveDeepArPublisher {
     }).whenComplete(() => _pushInFlight = false);
   }
 
-  Future<void> applyEffect(IsmLiveDeepArEffect effect) async {
+  Future<void> applyEffect(IsmLiveDeepArEffect effect) =>
+      _chainCall(() => _applyEffect(effect));
+
+  Future<void> _applyEffect(IsmLiveDeepArEffect effect) async {
     _currentEffect = effect;
     if (!_deepAr.isInitialized) {
       IsmLiveLog.error(
@@ -184,7 +232,9 @@ class IsmLiveDeepArPublisher {
     }
   }
 
-  Future<void> switchCamera() async {
+  Future<void> switchCamera() => _chainCall(_switchCamera);
+
+  Future<void> _switchCamera() async {
     if (!_started) return;
     final facing = await _deepAr.switchCamera();
     if (facing != null) {
@@ -194,7 +244,9 @@ class IsmLiveDeepArPublisher {
     }
   }
 
-  Future<void> stop() async {
+  Future<void> stop() => _chainCall(_stop);
+
+  Future<void> _stop() async {
     _started = false;
     await _frameSub?.cancel();
     _frameSub = null;

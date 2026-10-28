@@ -37,7 +37,15 @@
 
 # Keep WebRTC related classes
 -keep class org.webrtc.** { *; }
--keep class org.webrtc.** { *; }
+-keep class org.jni_zero.** { *; }
+
+# DeepAR frames are injected by reflecting into flutter_webrtc. Release R8
+# renames those members unless they are kept, and DeepAR is torn down right
+# after init. The plugin also ships these as consumer ProGuard rules.
+-keep class com.cloudwebrtc.webrtc.** { *; }
+-keep class ai.deepar.ar.** { *; }
+-keep class com.deepar.flutter_deepar.** { *; }
+-keep class com.example.appscrip_live_stream_component.** { *; }
 
 # Keep JSON related classes
 -keep class com.google.gson.** { *; }
@@ -76,4 +84,9 @@
 # Keep native libraries
 -keep class **.R$* {
     public static <fields>;
-} 
+}
+
+# Optional Play Feature Delivery / XML APIs referenced by Flutter and Tika.
+# They are not on the compile classpath; R8 fails the release build without this.
+-dontwarn com.google.android.play.core.**
+-dontwarn javax.xml.stream.XMLStreamException 

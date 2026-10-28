@@ -48,6 +48,9 @@ android {
     defaultConfig {
         // flutter_deepar requires 24+; keep host apps aligned.
         minSdkVersion 24
+        // Merged into the host app's release shrink so reflection into
+        // flutter_webrtc / DeepAR JNI still resolves. Debug builds skip R8.
+        consumerProguardFiles 'consumer-rules.pro'
     }
 
     dependencies {

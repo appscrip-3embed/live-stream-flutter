@@ -26,15 +26,9 @@ class AppscripLiveStreamComponentPlugin : FlutterPlugin, MethodCallHandler {
     appContext = flutterPluginBinding.applicationContext
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "appscrip_live_stream_component")
     channel.setMethodCallHandler(this)
-    externalVideo.bindEngineLookup {
-      // Reflect so host apps on an older embedding keep compiling and
-      // fall back to sharedSingleton.
-      val clazz = Class.forName("com.cloudwebrtc.webrtc.FlutterWebRTCPlugin")
-      val getPlugin = flutterPluginBinding.javaClass.methods.firstOrNull {
-        it.name == "getPlugin" && it.parameterTypes.size == 1
-      } ?: return@bindEngineLookup null
-      getPlugin.invoke(flutterPluginBinding, clazz)
-    }
+    // Binding, not the WebRTC plugin. The track manager resolves the plugin
+    // from this so a release shrink that renames FlutterWebRTCPlugin still works.
+    externalVideo.bindEngineLookup { flutterPluginBinding }
   }
 
   override fun onMethodCall(call: MethodCall, result: Result) {
@@ -69,6 +63,10 @@ class AppscripLiveStreamComponentPlugin : FlutterPlugin, MethodCallHandler {
         )
       }
       "disposeExternalVideoTrack" -> externalVideo.dispose(result)
+      "logDeepAr" -> {
+        android.util.Log.i("FlutterDeepAR", call.argument<String>("message") ?: "")
+        result.success(null)
+      }
       else -> result.notImplemented()
     }
   }

@@ -175,6 +175,9 @@ mixin StreamJoinCameraMixin on StreamJoinMixin {
             'DeepAR publish failed, falling back to LiveKit camera: $e',
             st,
           );
+          await IsmLiveExternalVideoSource.log(
+            'DeepAR publish failed, falling back to camera: $e',
+          );
           await _controller.deepArPublisher?.stop();
           _controller.deepArPublisher = null;
           final tracks = await Future.wait([

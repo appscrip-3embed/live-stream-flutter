@@ -20,7 +20,10 @@ class IsmLiveExternalVideoSource {
     required int height,
     int fps = 30,
   }) async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+    // Release AOT decodes method-channel maps as Map<Object?, Object?>.
+    // Casting that straight to Map<dynamic, dynamic> throws on some SDKs
+    // and the caller then tears DeepAR down. Copy into a fresh map.
+    final raw = await _channel.invokeMethod<Object?>(
       'createExternalVideoTrack',
       {
         'width': width,
@@ -28,10 +31,12 @@ class IsmLiveExternalVideoSource {
         'fps': fps,
       },
     );
-    if (result == null) {
-      throw StateError('createExternalVideoTrack returned null');
+    if (raw is! Map) {
+      throw StateError(
+        'createExternalVideoTrack returned ${raw?.runtimeType}',
+      );
     }
-    return result;
+    return Map<dynamic, dynamic>.from(raw);
   }
 
   /// Pushes one AR-processed frame into the active external track.
@@ -61,5 +66,12 @@ class IsmLiveExternalVideoSource {
   /// Releases the external track / capturer.
   static Future<void> disposeTrack() {
     return _channel.invokeMethod<void>('disposeExternalVideoTrack');
+  }
+
+  /// Logcat line under the FlutterDeepAR tag the host already filters on.
+  static Future<void> log(String message) async {
+    try {
+      await _channel.invokeMethod<void>('logDeepAr', {'message': message});
+    } catch (_) {}
   }
 }
