@@ -1,6 +1,7 @@
 import Foundation
 import Flutter
 import WebRTC
+import flutter_webrtc
 
 /// Creates a WebRTC video track backed by app-pushed BGRA/RGBA frames (DeepAR).
 ///
