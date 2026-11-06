@@ -314,6 +314,12 @@ mixin StreamJoinCameraMixin on StreamJoinMixin {
     final pub = participant.getTrackPublicationBySource(lk.TrackSource.camera);
     final track = pub?.track;
     if (track is! lk.LocalVideoTrack) return;
+    // DeepAR is the capturer. Restarting this track opens a second camera
+    // on the lens DeepAR already holds and the preview freezes.
+    if (_controller.deepArPublisher?.isStarted == true) {
+      _controller._rememberCameraFacing(track, _controller.position);
+      return;
+    }
     try {
       await track.setCameraPosition(_controller.position);
     } catch (e) {

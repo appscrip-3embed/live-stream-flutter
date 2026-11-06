@@ -26,6 +26,7 @@ class IsmLiveDeepArPublisher {
   IsmLiveDeepArEffect _currentEffect = IsmLiveDeepArEffect.none;
   bool _started = false;
   bool _pushInFlight = false;
+  bool _holdFrames = false;
   bool _isFrontCamera = true;
   int _frameCount = 0;
   int _droppedCount = 0;
@@ -169,7 +170,7 @@ class IsmLiveDeepArPublisher {
   }
 
   void _onFrame(DeepARFrame frame) {
-    if (!_started) return;
+    if (!_started || _holdFrames) return;
     // Backpressure: drop if previous push still in flight.
     if (_pushInFlight) {
       _droppedCount++;
@@ -236,11 +237,20 @@ class IsmLiveDeepArPublisher {
 
   Future<void> _switchCamera() async {
     if (!_started) return;
-    final facing = await _deepAr.switchCamera();
-    if (facing != null) {
-      _isFrontCamera = facing;
-    } else {
-      _isFrontCamera = !_isFrontCamera;
+    // Drop frames for the whole swap. iOS rebuilds the capture session
+    // after the method returns and keeps feeding the previous lens with
+    // the new mirror flag, which publishes a left-right flipped image.
+    _holdFrames = true;
+    try {
+      final facing = await _deepAr.switchCamera();
+      if (facing != null) {
+        _isFrontCamera = facing;
+      } else {
+        _isFrontCamera = !_isFrontCamera;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+    } finally {
+      _holdFrames = false;
     }
   }
 

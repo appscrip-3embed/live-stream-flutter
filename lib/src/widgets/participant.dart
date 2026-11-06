@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:ui' as ui;
 
 import 'package:appscrip_live_stream_component/appscrip_live_stream_component.dart';
 import 'package:collection/collection.dart';
@@ -346,9 +345,9 @@ class _LocalParticipantWidgetState
     if (!Get.isRegistered<IsmLiveStreamController>()) {
       return super.buildVideoRenderer();
     }
-    // Rebuilds local preview immediately when camera position toggles, and
-    // overlays a brief blur while [IsmLiveStreamController.isCameraSwitching]
-    // is true so the native camera swap glitch is not visible.
+    // Rebuilds local preview when the lens changes. The cover is opaque:
+    // a blur still showed the mirrored frames from the lens being closed,
+    // which reads as the picture flipping left and right.
     return GetBuilder<IsmLiveStreamController>(
       builder: (controller) => Stack(
         fit: StackFit.expand,
@@ -360,10 +359,9 @@ class _LocalParticipantWidgetState
               switchInCurve: Curves.easeOut,
               switchOutCurve: Curves.easeIn,
               child: controller.isCameraSwitching
-                  ? BackdropFilter(
-                      key: const ValueKey('camera-switch-blur'),
-                      filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                      child: const ColoredBox(color: Color(0x33000000)),
+                  ? const ColoredBox(
+                      key: ValueKey('camera-switch-cover'),
+                      color: Colors.black,
                     )
                   : const SizedBox.shrink(
                       key: ValueKey('camera-switch-idle'),

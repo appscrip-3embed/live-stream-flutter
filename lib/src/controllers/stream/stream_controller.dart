@@ -11,7 +11,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background/flutter_background.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:get/get.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
@@ -110,11 +109,15 @@ class IsmLiveStreamController extends GetxController
 
   bool isHdBroadcast = false;
 
-  /// True while [toggleCamera] is in progress. Used by the local
-  /// participant tile to briefly fade-cover the preview so the user
-  /// does not see the 1-2 frame mirror/orientation glitch during a
-  /// native camera hardware swap.
+  /// True while [toggleCamera] is in progress. The local preview stays
+  /// covered until the new camera is actually producing frames, so the
+  /// host never sees the mirror flip or the texture slide from the swap.
   bool isCameraSwitching = false;
+
+  /// Ignores a second flip while the first native camera open is still
+  /// running. Overlapping switches wedge the camera HAL and leave the
+  /// preview mirrored on the wrong lens.
+  bool _cameraSwitchLocked = false;
 
   bool isRecordingBroadcast = false;
 
@@ -1184,90 +1187,96 @@ class IsmLiveStreamController extends GetxController
   }
 
   void toggleCamera() async {
+    if (_cameraSwitchLocked) return;
     final participant = room?.localParticipant;
-    if (participant == null) {
-      return;
-    }
+    if (participant == null) return;
 
-    // DeepAR owns the camera when active — flip via DeepAR, not WebRTC Helper.
-    final deepAr = deepArPublisher;
-    if (deepAr != null && deepAr.isStarted) {
-      final previousPosition = position;
-      final newPosition = position.switched();
-      isCameraSwitching = true;
-      update();
-      try {
-        await deepAr.switchCamera();
-        position = newPosition;
-      } catch (error) {
-        position = previousPosition;
-        IsmLiveLog('DeepAR camera switch failed: $error');
-      }
-      await Future.delayed(const Duration(milliseconds: 140));
-      isCameraSwitching = false;
-      update();
-      return;
-    }
-
-    final track = participant.videoTrackPublications.firstOrNull?.track;
-    if (track == null) return;
-
+    _cameraSwitchLocked = true;
     final previousPosition = position;
-    final newPosition = position.switched();
-
-    // Briefly cover the local preview during the swap so the user does not
-    // see the 1-2 frame mirror/orientation glitch caused by native camera
-    // hardware switching. Reset on completion or failure.
     isCameraSwitching = true;
     update();
 
-    // Prefer a fast hardware-level camera flip on native platforms. This keeps
-    // the same underlying MediaStreamTrack/renderer alive instead of tearing it
-    // down, which previously caused a visible right-to-left slide artifact on
-    // the preview while `setCameraPosition` fully restarted the track.
-    if (!kIsWeb) {
-      try {
-        await webrtc.Helper.switchCamera(track.mediaStreamTrack);
-        // Keep LiveKit's internal options in sync so reconnect / republish
-        // flows (e.g. `_syncPublishedCameraToControllerPosition`) resolve the
-        // correct facing direction after this fast switch.
-        final options = track.currentOptions;
-        if (options is lk.CameraCaptureOptions) {
-          track.currentOptions = options.copyWith(cameraPosition: newPosition);
-        }
-        position = newPosition;
-        update();
-        // Allow camera pipeline to flush new frames before fading the
-        // overlay out so users never see un-mirrored front frames or
-        // mirrored back frames.
-        await Future.delayed(const Duration(milliseconds: 140));
-        isCameraSwitching = false;
+    try {
+      // DeepAR owns the capturer. A LiveKit restart would open a second
+      // camera session against the same lens and freeze the preview.
+      final deepAr = deepArPublisher;
+      if (deepAr != null && deepAr.isStarted) {
+        await deepAr.switchCamera();
+        position = deepAr.isFrontCamera
+            ? lk.CameraPosition.front
+            : lk.CameraPosition.back;
+        _rememberCameraFacing(_localCameraTrack(participant), position);
         update();
         return;
-      } catch (error) {
-        position = previousPosition;
-        isCameraSwitching = false;
-        update();
-        IsmLiveLog(
-          'fast camera switch failed, falling back to restart: $error',
-        );
       }
-    }
 
-    try {
-      await track.setCameraPosition(newPosition);
-      position = newPosition;
+      final track = _localCameraTrack(participant);
+      if (track == null) return;
+
+      final next = previousPosition.switched();
+      // Full restart, not Helper.switchCamera. The fast flip leaves
+      // flutter_webrtc's facing flag stale, so the next tap targets the
+      // lens that is already open (preview stuck) and the local mirror
+      // is applied to the wrong camera (image flips left-right).
+      await _openCameraFacing(track, next);
+      position = next;
       update();
-      await Future.delayed(const Duration(milliseconds: 140));
-      isCameraSwitching = false;
-      update();
+      await Future<void>.delayed(const Duration(milliseconds: 320));
     } catch (error) {
       position = previousPosition;
+      IsmLiveLog('camera switch failed: $error');
+      final track = _localCameraTrack(participant);
+      if (track != null && deepArPublisher?.isStarted != true) {
+        try {
+          await track.setCameraPosition(previousPosition);
+        } catch (restoreError) {
+          IsmLiveLog('camera restore failed: $restoreError');
+        }
+      }
+    } finally {
       isCameraSwitching = false;
+      _cameraSwitchLocked = false;
       update();
-      IsmLiveLog('could not restart track: $error');
-      return;
     }
+  }
+
+  lk.LocalVideoTrack? _localCameraTrack(lk.LocalParticipant participant) {
+    final track =
+        participant.getTrackPublicationBySource(lk.TrackSource.camera)?.track;
+    return track is lk.LocalVideoTrack ? track : null;
+  }
+
+  /// Opens [next] on a fresh capturer. One retry covers the HAL still
+  /// releasing the previous lens ("camera in use"), which otherwise leaves
+  /// the preview frozen.
+  Future<void> _openCameraFacing(
+    lk.LocalVideoTrack track,
+    lk.CameraPosition next,
+  ) async {
+    try {
+      await track.setCameraPosition(next);
+    } catch (error) {
+      IsmLiveLog('camera open retry after: $error');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await track.setCameraPosition(next);
+    }
+  }
+
+  void _rememberCameraFacing(
+    lk.LocalVideoTrack? track,
+    lk.CameraPosition next,
+  ) {
+    if (track == null) return;
+    final options = track.currentOptions;
+    if (options is! lk.CameraCaptureOptions) return;
+    track.currentOptions = lk.CameraCaptureOptions(
+      cameraPosition: next,
+      maxFrameRate: options.maxFrameRate,
+      params: options.params,
+      focusMode: options.focusMode,
+      exposureMode: options.exposureMode,
+      stopCameraCaptureOnMute: options.stopCameraCaptureOnMute,
+    );
   }
 
   Future<void> animateToPage(int index) async =>
