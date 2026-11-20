@@ -371,23 +371,17 @@ class _CameraScreenViewState extends State<CameraScreenView>
                                       List.from(IsmLiveUtility.videoTypeList)),
                               );
                             }
-                            final pickedFile =
-                                await FilePicker.platform.pickFiles(
+                            final pickedFile = await FilePicker.pickFile(
                               type: FileType.custom,
-                              allowMultiple: false,
                               compressionQuality: 100,
                               allowedExtensions: allowedExtensions,
                             );
 
                             if (pickedFile == null) return;
-                            if (pickedFile.files.isEmpty) return;
-                            if (pickedFile.files.first.path == null) return;
-                            if (pickedFile.files.first.path?.isEmpty == true) {
-                              return;
-                            }
+                            final path = pickedFile.path;
+                            if (path == null || path.isEmpty) return;
 
-                            IsmLiveRoute.pop<XFile>(
-                                XFile(pickedFile.files.first.path ?? ''));
+                            IsmLiveRoute.pop<XFile>(XFile(path));
                           },
                           child: Container(
                             height: IsmLiveDimens.thirtyFive,

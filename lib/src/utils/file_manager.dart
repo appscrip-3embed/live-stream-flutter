@@ -79,18 +79,13 @@ class FileManager {
   }
 
   static Future<XFile?> pickDocument([bool pdfOnly = true]) async {
-    var file = await FilePicker.platform.pickFiles(
-      allowMultiple: false,
-      allowedExtensions: pdfOnly ? ['pdf'] : null,
-      type: pdfOnly ? FileType.custom : FileType.any,
-      withData: true,
-    );
-    if (file == null || file.files.isEmpty) {
-      return null;
-    }
     try {
-      var platformFile = file.files.first;
-      return XFile(platformFile.path!);
+      final platformFile = await FilePicker.pickFile(
+        allowedExtensions: pdfOnly ? ['pdf'] : null,
+        type: pdfOnly ? FileType.custom : FileType.any,
+      );
+      // file_picker v13+: use [PlatformFile.xFile] (path may be null on web/SAF).
+      return platformFile?.xFile;
     } catch (e, st) {
       IsmLiveLog.error(e, st);
       return null;
@@ -111,12 +106,14 @@ class FileManager {
           lockAspectRatio: true,
           cropStyle: CropStyle.rectangle,
         ),
-        IOSUiSettings(title: IsmLiveStrings.cropper, // cropStyle: CropStyle.rectangle,
+        IOSUiSettings(
+          title: IsmLiveStrings.cropper, // cropStyle: CropStyle.rectangle,
           aspectRatioPresets: [
             CropAspectRatioPreset.original,
             CropAspectRatioPreset.square,
             CropAspectRatioPresetCustom(),
-          ],)
+          ],
+        )
       ],
     );
 
